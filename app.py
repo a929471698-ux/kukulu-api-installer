@@ -55,15 +55,20 @@ def get_mapping(email):
 app = Flask(__name__, template_folder="templates", static_folder="static")
 manager = TokenManager()
 
+# --- 创建邮箱（随机后缀）
 @app.route("/api/create_random", methods=["GET"])
+@app.route("/api/create_随机后缀", methods=["GET"])
 def api_create_random():
     token = manager.get_token()
     k = Kukulu(token['csrf_token'], token['sessionhash'])
     mail = k.create_mailaddress()
     set_mapping(mail, token['csrf_token'], token['sessionhash'])
+    logging.info(f"[CREATE_AUTO] mail={mail} token={json.dumps(token)}")
     return jsonify({"mailaddress": mail, **token})
 
+# --- 创建邮箱（指定后缀池随机挑一个）
 @app.route("/api/create_custom", methods=["GET"])
+@app.route("/api/create_指定后缀", methods=["GET"])
 def api_create_custom():
     domains = load_domains()
     if not domains:
@@ -73,8 +78,10 @@ def api_create_custom():
     k = Kukulu(token['csrf_token'], token['sessionhash'])
     mail = k.specify_address(domain)
     set_mapping(mail, token['csrf_token'], token['sessionhash'])
+    logging.info(f"[CREATE_CUSTOM] mail={mail} domain={domain} token={json.dumps(token)}")
     return jsonify({"mailaddress": mail, **token})
 
+# --- 仅传邮箱获取验证码（自动用缓存 token，失败轮换）
 @app.route("/api/check_captcha/<path:mailaddr>", methods=["GET"])
 def api_check_captcha(mailaddr):
     email = unquote(mailaddr)
@@ -94,6 +101,28 @@ def api_check_captcha(mailaddr):
             set_mapping(email, token["csrf_token"], token["sessionhash"])
             return jsonify({"mailaddress": email, "code": code})
     return jsonify({"mailaddress": email, "code": None}), 404
+
+# --- 无密钥的后缀池管理（GET/POST）
+@app.route("/api/domains", methods=["GET", "POST"])
+def api_domains():
+    if request.method == "GET":
+        return jsonify({"domains": load_domains()})
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, list):
+        return jsonify({"error": "body must be a JSON array of domains"}), 400
+    domains_clean = [str(x).strip() for x in data if str(x).strip()]
+    save_domains(domains_clean)
+    return jsonify({"ok": True, "domains": domains_clean})
+
+# --- 历史记录（从 data/mail_tokens.json 读取）
+@app.route("/api/history", methods=["GET"])
+def api_history():
+    m = load_map()
+    history = [
+        {"mailaddress": mail, **info}
+        for mail, info in sorted(m.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)
+    ]
+    return jsonify({"history": history})
 
 @app.route("/ui")
 def ui_page():
