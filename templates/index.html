@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Kukulu v8.1 控制台</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body class="p-4">
+<div class="container">
+  <h3>📬 Kukulu v8.1 控制台</h3>
+
+  <div class="alert alert-info mt-3">
+    <b>API 调用示例：</b>
+    <ul class="mb-0" id="api-links"></ul>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-header">后缀池管理</div>
+    <div class="card-body">
+      <textarea id="domains" class="form-control" rows="6" placeholder="每行一个后缀，如: lovemail.jp"></textarea>
+      <div class="mt-2">
+        <button class="btn btn-primary" onclick="saveDomains()">保存</button>
+        <span id="msg" class="ms-3 text-muted"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const host = window.location.host;
+const links = [
+  ["获取邮箱（随机后缀）", `http://${host}/api/create_random`],
+  ["获取邮箱（指定后缀池）", `http://${host}/api/create_custom`],
+  ["获取验证码（示例）", `http://${host}/api/check_captcha/xxxx@xxxx`],
+];
+document.getElementById("api-links").innerHTML = links.map(
+  ([name, url]) => `<li>${name}：<code>${url}</code></li>`
+).join("");
+
+async function saveDomains(){
+  const list = document.getElementById('domains').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const res = await fetch('/api/domains', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-Admin-Key': prompt("请输入管理口令")},
+    body: JSON.stringify(list)
+  });
+  document.getElementById('msg').innerText = res.ok ? '保存成功' : ('保存失败：' + res.status);
+}
+</script>
+</body>
+</html>
