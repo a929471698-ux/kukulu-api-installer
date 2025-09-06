@@ -20,7 +20,11 @@ echo "📁 解压部署包到 /root/kukulu_api"
 rm -rf /root/kukulu_api
 mkdir -p /root/kukulu_api
 cd /root/kukulu_api
-curl -L -o kukulu_api_v7.zip https://raw.githubusercontent.com/a929471698-ux/kukulu-api-installer/main/kukulu_api_v7.zip
+
+echo "⬇️ 正在下载最新部署包..."
+curl -L -o kukulu_api_v7.zip https://github.com/a929471698-ux/kukulu-api-installer/releases/download/v7.0.0/kukulu_api_v7_clean.zip
+
+echo "📦 解压 ZIP..."
 unzip kukulu_api_v7.zip
 
 echo "🚀 启动服务（一次性）"
@@ -49,4 +53,4 @@ systemctl enable kukulu_api
 systemctl restart kukulu_api
 
 echo "✅ 部署完成！"
-echo "🌐 访问: http://$(hostname -I | awk '{print $1}'):8080/ui"
+echo "🌐 Web UI 访问地址: http://$(hostname -I | awk '{print $1}'):8080/ui"
