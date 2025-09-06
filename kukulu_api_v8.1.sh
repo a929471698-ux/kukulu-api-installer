@@ -7,18 +7,19 @@ apt update && apt install -y unzip python3-pip python3-venv curl
 echo "📁 创建 Python 虚拟环境..."
 cd /root
 python3 -m venv /root/kukulu_env
-
-echo "✅ 虚拟环境已创建在 /root/kukulu_env"
 source /root/kukulu_env/bin/activate
 
-echo "🌐 安装 Python 依赖到虚拟环境..."
+echo "🌐 升级 pip..."
 pip install --upgrade pip
 
-echo "📁 拉取项目代码到 /root/kukulu_api"
+echo "📁 下载并解压 Release 包到 /root/kukulu_api"
 rm -rf /root/kukulu_api
-git clone https://github.com/a929471698-ux/kukulu-api-installer.git /root/kukulu_api
-
+mkdir -p /root/kukulu_api
 cd /root/kukulu_api
+curl -L -o kukulu_api_v8.1.zip https://github.com/a929471698-ux/kukulu-api-installer/releases/download/v8.1.0/kukulu_api_v8.1.zip
+unzip -o kukulu_api_v8.1.zip
+
+echo "📦 安装 Python 依赖..."
 pip install -r requirements.txt
 
 echo "🚀 启动服务（一次性测试运行）"
