@@ -58,8 +58,6 @@ class Kukulu():
     def check_top_mail(self, mailaddress):
         encoded = quote(mailaddress)
         inbox_url = f"https://kuku.lu/mailbox/{encoded}"
-        iframe_url = "https://m.kuku.lu/smphone.app.recv.view.php"
-
         try:
             headers = {
                 "User-Agent": self._random_user_agent(),
@@ -70,24 +68,26 @@ class Kukulu():
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
             }
 
+            # Step 1: 请求收件箱
             inbox_resp = self.session.get(inbox_url, headers=headers, timeout=10)
             soup = BeautifulSoup(inbox_resp.text, "html.parser")
 
-            forms = soup.find_all("form", action="https://m.kuku.lu/smphone.app.recv.view.php")
-            for form in forms:
-                inputs = {i.get("name"): i.get("value") for i in form.find_all("input")}
-                num = inputs.get("num")
-                key = inputs.get("key")
-                if not num or not key:
+            # Step 2: 提取邮件详情链接（新版结构）
+            a_tags = soup.find_all("a", href=re.compile(r"smphone\.app\.recv\.view\.php\?num=\d+&key=\w+"))
+            for a in a_tags:
+                href = a["href"]
+                match = re.search(r"num=(\d+)&key=([a-zA-Z0-9]+)", href)
+                if not match:
                     continue
+                num, key = match.groups()
 
-                post_data = {
-                    "num": num,
-                    "key": key,
-                    "noscroll": "1"
-                }
-
-                resp = self.session.post(iframe_url, data=post_data, headers=headers, timeout=10)
+                # Step 3: 发起 POST 获取邮件内容
+                resp = self.session.post(
+                    "https://m.kuku.lu/smphone.app.recv.view.php",
+                    data={"num": num, "key": key, "noscroll": "1"},
+                    headers=headers,
+                    timeout=10
+                )
 
                 print("[DEBUG] 响应状态码:", resp.status_code)
                 print("[DEBUG] 响应正文前500字符 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓")
@@ -104,6 +104,6 @@ class Kukulu():
                     return code.group()
 
         except Exception as e:
-            print(f"[ERROR] check_top_mail iframe-mode failed: {e}")
+            print(f"[ERROR] check_top_mail failed: {e}")
 
         return None
