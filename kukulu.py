@@ -1,4 +1,4 @@
-# kukulu.py  —— 只替换本文件；面板(app.py等)不改
+# kukulu.py —— 仅替换本文件；面板(app.py)与API逻辑不需要改动
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -12,7 +12,7 @@ class Kukulu():
         self.proxy       = proxy
         self.session     = requests.Session()
 
-        # --- 把关键 Cookie 同时写入 m.kuku.lu 与 kuku.lu；并修正 SHASH%3A → SHASH:
+        # === 把关键 Cookie 同时写入 m.kuku.lu 与 kuku.lu；修正 SHASH%3A → SHASH:
         def _set_cookie(name, value, domains=("m.kuku.lu", "kuku.lu")):
             for d in domains:
                 self.session.cookies.set(name, value, domain=d, path="/")
@@ -38,7 +38,7 @@ class Kukulu():
             "Connection": "keep-alive",
         }
 
-        # 预热（失败也不抛）
+        # 预热（失败不抛）
         try:
             self.session.get("https://m.kuku.lu", headers=self.default_headers, timeout=10, proxies=self.proxy)
             self.session.get("https://kuku.lu",  headers=self.default_headers, timeout=10, proxies=self.proxy)
@@ -59,33 +59,70 @@ class Kukulu():
             "sessionhash": self.session.cookies.get("cookie_sessionhash"),
         }
 
-    # ===================== 这里是你现在的痛点：create_mailaddress =====================
+    # ===================== 关键修复：create_mailaddress 多路径强兜底 =====================
     def create_mailaddress(self):
         """
-        三重兜底：
+        顺序：
         1) 标准：addMailAddrByAuto & nopost=1 & by_system=1 & csrf_token_check
-        2) 备用：去掉 nopost（有时会被拦）
-        3) 正则兜底：不是 OK: 就从文本里直接提邮箱
+        2) 备用：去掉 nopost
+        3) 强头重试：加 Referer=index.php 与 Sec-Fetch-* 系列
+        4) 兜底解析：直接访问 index.php，从页面中正则提邮箱（已有/刚创建）
+        任一路拿到邮箱样式即返回
         """
-        def try_once(url):
-            r = self.session.get(url, proxies=self.proxy, headers=self.default_headers, timeout=15)
+        def _try(url, extra_headers=None):
+            hdr = dict(self.default_headers)
+            if extra_headers:
+                hdr.update(extra_headers)
+            r = self.session.get(url, proxies=self.proxy, headers=hdr, timeout=15)
             txt = r.text.strip()
+            # 第一优先：OK:xxx@yyy
             if txt.startswith("OK:") and "@" in txt:
                 return txt[3:].strip()
-            # 兜底：直接正则提邮箱
+            # 全文兜底：直接提一个邮箱样式
             m = re.search(r"[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", txt)
-            if m:
-                return m.group(0)
-            return ""
+            return m.group(0) if m else ""
 
+        # 1) 标准参数
         base = "https://m.kuku.lu/index.php?action=addMailAddrByAuto&by_system=1"
         qs1  = "&nopost=1"
         ctp  = f"&csrf_token_check={self.csrf_token}" if self.csrf_token else ""
-        # 尝试顺序：带 nopost → 不带 nopost
-        for url in (base + qs1 + ctp, base + ctp):
-            mail = try_once(url)
+
+        # 2) 强 Referer + Sec-Fetch-*（贴近浏览器）
+        strong_headers = {
+            "Referer": "https://m.kuku.lu/index.php",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+            "Upgrade-Insecure-Requests": "1",
+        }
+
+        # 依次尝试
+        for url in (
+            base + qs1 + ctp,
+            base + ctp,
+        ):
+            mail = _try(url)
             if mail:
                 return mail
+
+        # 强头再试两次
+        for url in (
+            base + qs1 + ctp,
+            base + ctp,
+        ):
+            mail = _try(url, strong_headers)
+            if mail:
+                return mail
+
+        # 4) 兜底：直接从 index.php 页面提一个邮箱（已有/刚创建）
+        try:
+            r = self.session.get("https://m.kuku.lu/index.php", headers=self.default_headers, timeout=15, proxies=self.proxy)
+            m = re.search(r"[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r.text)
+            if m:
+                return m.group(0)
+        except Exception:
+            pass
+
         return ""
 
     def specify_address(self, address):
@@ -101,9 +138,9 @@ class Kukulu():
     def check_top_mail(self, mailaddress):
         """
         行为保持不变：
-        - 先挂载 cookie_last_q
-        - 桌面页提取 num/key；若无 → 回退 m 站 AJAX（含 openMailData 解析）
-        - 详情页 POST smphone.app.recv.view.php，正则提取 6 位验证码
+        - 先挂载 cookie_last_q（两域），避免 /mailbox 被主页
+        - 桌面页提 num/key；若无 → 回退 m 站 AJAX（含 openMailData 解析）
+        - 详情 POST smphone.app.recv.view.php，正则提 6 位验证码
         """
         self._set_current_mail_cookie(mailaddress)
 
@@ -162,14 +199,12 @@ class Kukulu():
 
     # ====== 内部辅助 ======
     def _set_current_mail_cookie(self, mailaddress: str):
-        # 声明“当前邮箱”（两个域都写），贴近浏览器行为，避免 /mailbox 被踢回主页
         for d in ("m.kuku.lu", "kuku.lu"):
             self.session.cookies.set("cookie_last_q", mailaddress, domain=d, path="/")
         self.session.cookies.set("cookie_last_page_recv", "0", domain="m.kuku.lu", path="/")
         self.session.cookies.set("cookie_last_page_addrlist", "0", domain="m.kuku.lu", path="/")
 
     def _extract_candidates_from_desktop(self, html: str, soup: BeautifulSoup):
-        """桌面页候选提取：a[href] 优先 + 全文正则兜底"""
         candidates = []
         for a in soup.find_all("a", href=True):
             m = re.search(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", a["href"])
@@ -181,11 +216,6 @@ class Kukulu():
         return candidates
 
     def _extract_candidates_from_mobile_ajax(self, html: str):
-        """
-        移动 AJAX 候选提取：
-        1) 明文 URL: smphone.app.recv.view.php?num=...&key=...
-        2) JS: openMailData('num','key',...) —— 常见于 m 站回包
-        """
         candidates = []
         candidates += re.findall(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", html)
         candidates += re.findall(r"openMailData\('(\d+)'\s*,\s*'([0-9a-fA-F]+)'\s*,", html)
