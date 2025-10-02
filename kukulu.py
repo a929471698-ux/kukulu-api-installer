@@ -88,6 +88,12 @@ class Kukulu():
                 }
 
                 resp = self.session.post(iframe_url, data=post_data, headers=headers, timeout=10)
+
+                print("[DEBUG] 响应状态码:", resp.status_code)
+                print("[DEBUG] 响应正文前500字符 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓")
+                print(resp.text[:500])
+                print("↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑")
+
                 if resp.status_code != 200:
                     continue
 
