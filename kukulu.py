@@ -1,8 +1,9 @@
+# kukulu.py  —— 仅替换本文件；面板(app.py等)一律不改
 import requests
 from bs4 import BeautifulSoup
 import re
 import random
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 import os
 from datetime import datetime
 
@@ -13,26 +14,19 @@ class Kukulu():
         self.proxy = proxy
         self.session = requests.Session()
 
-        # --- 关键：标准化并设置 cookie（含 domain/path）
+        # --- 关键：在 m.kuku.lu 域设置必要 cookie（并修正 SHASH）
         if csrf_token:
             self.session.cookies.set(
-                "cookie_csrf_token",
-                csrf_token,
-                domain="m.kuku.lu",
-                path="/"
+                "cookie_csrf_token", csrf_token,
+                domain="m.kuku.lu", path="/"
             )
         if sessionhash:
-            # 许多场景下缓存的是 URL 编码的 SHASH 值（SHASH%3Axxxx）
-            shash = sessionhash
-            if "%3A" in shash:
-                shash = shash.replace("%3A", ":")
+            shash = sessionhash.replace("%3A", ":") if "%3A" in sessionhash else sessionhash
             self.session.cookies.set(
-                "cookie_sessionhash",
-                shash,
-                domain="m.kuku.lu",
-                path="/"
+                "cookie_sessionhash", shash,
+                domain="m.kuku.lu", path="/"
             )
-        # 语言/保活同样在 m.kuku.lu 域设置，确保服务端识别
+        # 语言/保活
         self.session.cookies.set("cookie_setlang", "cn", domain="m.kuku.lu", path="/")
         self.session.cookies.set("cookie_keepalive_insert", "1", domain="m.kuku.lu", path="/")
 
@@ -47,7 +41,7 @@ class Kukulu():
             "Connection": "keep-alive",
         }
 
-        # 走一遍 m.kuku.lu 初始化（贴近浏览器行为）
+        # 模拟浏览器先触发一次
         try:
             self.session.post("https://m.kuku.lu", proxies=self.proxy, headers=self.default_headers, timeout=10)
         except Exception:
@@ -78,15 +72,31 @@ class Kukulu():
         resp = self.session.get(url, proxies=self.proxy, headers=self.default_headers, timeout=15)
         return resp.text[3:]
 
+    def _set_current_mail_cookie(self, mailaddress: str):
+        """
+        让服务器“知道”你要看的邮箱是谁：
+        - cookie_last_q = 当前邮箱（URL 编码由服务器处理，这里直接放原文也能被接受）
+        - 两个域都写：m.kuku.lu + kuku.lu
+        """
+        try:
+            self.session.cookies.set("cookie_last_q", mailaddress, domain="m.kuku.lu", path="/")
+            self.session.cookies.set("cookie_last_q", mailaddress, domain="kuku.lu",   path="/")
+            # 与 UI 行为一致，补充这两个“最近页面指示”也有助于稳定
+            self.session.cookies.set("cookie_last_page_recv", "0", domain="m.kuku.lu", path="/")
+            self.session.cookies.set("cookie_last_page_addrlist", "0", domain="m.kuku.lu", path="/")
+        except Exception:
+            pass
+
     def check_top_mail(self, mailaddress):
         """
-        适配新版 kukulu：
-        - 修正 cookie_sessionhash（SHASH: 而非 SHASH%3A）
-        - /mailbox/ 页面可能含多层结构，使用 a+regex 双通道提取 num/key
-        - 详情用 POST smphone.app.recv.view.php 获取正文
-        - 调试文件落地到 debug_html/
+        修复点：
+        - 先把当前邮箱写入 cookie_last_q（两个域都写），避免 /mailbox 被踢回首页
+        - 纠正 SHASH%3A → SHASH:
+        - a选择器 + 全文正则 两套提取 num/key，避免嵌套丢失
+        - 详情页 POST 拉取正文；保存 debug_html 便于复核
         """
-        # mailbox URL（保持你原来的入口不变）
+        self._set_current_mail_cookie(mailaddress)
+
         encoded = quote(mailaddress)
         inbox_url = f"https://kuku.lu/mailbox/{encoded}"
 
@@ -103,33 +113,31 @@ class Kukulu():
                 ])
             }
 
-            # Step 1: 打开收件箱
+            # Step 1: 打开收件箱（若没挂载/没cookie_last_q，常被重定向到首页）
             inbox_resp = self.session.get(inbox_url, headers=headers, proxies=self.proxy, timeout=15)
 
-            # 保存收件箱 HTML 便于你排查（你说必须完整输出/便于调试）
+            # 落地调试
             self._save_html_debug(inbox_resp.text, tag=f"inbox_{self._safe_name(mailaddress)}")
 
             soup = BeautifulSoup(inbox_resp.text, "html.parser")
 
-            # Step 2a: 先尝试 a 标签提取（新版常见）
-            a_tags = soup.find_all("a", href=re.compile(r"smphone\.app\.recv\.view\.php\?num=\d+&key=[A-Za-z0-9]+"))
+            # Step 2a: a标签提取
             candidates = []
-            for a in a_tags:
-                href = a.get("href") or ""
-                m = re.search(r"num=(\d+)&key=([A-Za-z0-9]+)", href)
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                m = re.search(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", href)
                 if m:
                     candidates.append(m.groups())
 
-            # Step 2b: 再用正则在整页兜底（应对深层嵌套/JS 注入）
+            # Step 2b: 全文正则兜底
             if not candidates:
                 for m in re.findall(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", inbox_resp.text):
                     candidates.append(m)
 
             if not candidates:
-                # 依然找不到，很可能还在首页/未挂载/cookie 不生效（你之前的 debug 就是首页）:contentReference[oaicite:3]{index=3}
                 return None
 
-            # Step 3: 逐个尝试抓详情正文
+            # Step 3: 拉正文
             detail_url = "https://m.kuku.lu/smphone.app.recv.view.php"
             for num, key in candidates:
                 post_data = {"num": num, "key": key, "noscroll": "1"}
@@ -137,16 +145,12 @@ class Kukulu():
                     detail_url, data=post_data, headers=headers,
                     proxies=self.proxy, timeout=15
                 )
-
-                # 保存详情页 HTML
                 self._save_html_debug(detail_resp.text, tag=f"detail_{num}")
 
                 if detail_resp.status_code != 200:
                     continue
 
-                # 提取六位验证码
-                soup_detail = BeautifulSoup(detail_resp.text, "html.parser")
-                text = soup_detail.get_text(" ", strip=True)
+                text = BeautifulSoup(detail_resp.text, "html.parser").get_text(" ", strip=True)
                 code = re.search(r"\b\d{6}\b", text)
                 if code:
                     return code.group()
@@ -156,7 +160,7 @@ class Kukulu():
 
         return None
 
-    # === 工具方法 ===
+    # === 工具 ===
     def _safe_name(self, s: str) -> str:
         return s.replace("@", "_").replace("/", "_").replace("\\", "_")
 
