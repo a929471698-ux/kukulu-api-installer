@@ -1,196 +1,156 @@
-# token_manager.py
-# 需求实现：
-# - 启动时/运行中发现“跨天”→ 删除旧 tokens，自动生成 5 个新 tokens 并持久化
-# - get_token() / rotate_token() 与现有 app.py 完全兼容
-# - 自动修正 sessionhash 为 "SHASH:xxxx"（避免 SHASH%3A 编码坑）
+# token_manager.py  —— 直接整文件替换
 
-import os
 import json
-import random
+import os
+import re
+import threading
 import time
+from typing import Dict, Optional, Tuple, List
+
 import requests
-from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# ========= 可调参数 =========
-TARGET_TOKEN_COUNT = 5            # 每天生成的 token 数量
-REQUEST_TIMEOUT    = 12           # 单次请求超时
-PARALLEL_WORKERS   = 5            # 并发生成线程
-PROXY              = None         # 如需代理：{"http": "...", "https": "..."}；否则 None
-TZ_OFFSET_MINUTES  = 540            # 本地时区偏移（需要按特定时区轮换可改，比如日本 +540）
+SUBTOKEN_RE = re.compile(r"csrf_subtoken_check=([0-9a-fA-F]{32})")
 
-# ========= 路径 =========
-APP_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR  = os.path.join(APP_DIR, "data")
-TOKENS_DB = os.path.join(DATA_DIR, "mail_tokens.json")
-os.makedirs(DATA_DIR, exist_ok=True)
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
-# ========= 工具 =========
-def _now_tz():
-    tz = timezone(timedelta(minutes=TZ_OFFSET_MINUTES))
-    return datetime.now(tz)
+BASE_URL = os.getenv("KUKULU_BASE_URL", "https://m.kuku.lu")
+INDEX_PATH = "/index.php"
 
-def _today_key():
-    return _now_tz().strftime("%Y-%m-%d")
-
-def _random_user_agent():
-    return random.choice([
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/113.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/117.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/110.0.0.0 Safari/537.36",
-    ])
-
-def _normalize_shash(shash: str) -> str:
-    """修正 SHASH%3Axxxx → SHASH:xxxx"""
-    if shash and "%3A" in shash:
-        return shash.replace("%3A", ":")
-    return shash
-
-def _is_valid_token(t: dict) -> bool:
-    return bool(
-        t and t.get("csrf_token") and t.get("sessionhash") and
-        str(t["sessionhash"]).startswith("SHASH:")
-    )
-
-def _load_tokens():
-    if not os.path.exists(TOKENS_DB):
-        return {"day": None, "tokens": []}
-    try:
-        with open(TOKENS_DB, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"day": None, "tokens": []}
-            # 兼容老格式（纯 list）
-            if "tokens" not in data and isinstance(data, list):
-                return {"day": None, "tokens": data}
-            return data
-    except Exception:
-        return {"day": None, "tokens": []}
-
-def _save_tokens(day_key: str, tokens: list):
-    tmp = TOKENS_DB + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"day": day_key, "tokens": tokens}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, TOKENS_DB)
-
-# ========= 生成 =========
-def _gen_one_token(proxy=None) -> dict:
-    """
-    访问 https://m.kuku.lu 获取 cookie_csrf_token / cookie_sessionhash
-    返回 {"csrf_token": "...", "sessionhash": "SHASH:..."}
-    """
-    sess = requests.Session()
-    headers = {
-        "User-Agent": _random_user_agent(),
+def _new_session(ua: str) -> requests.Session:
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update({
+        "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
         "Connection": "keep-alive",
-    }
-    # 预热主页
-    sess.get("https://m.kuku.lu", headers=headers, timeout=REQUEST_TIMEOUT, proxies=proxy)
-    csrf  = sess.cookies.get("cookie_csrf_token")
-    shash = sess.cookies.get("cookie_sessionhash")
-    # 备份尝试
-    if not csrf or not shash:
-        sess.get("https://m.kuku.lu/index.php", headers=headers, timeout=REQUEST_TIMEOUT, proxies=proxy)
-        csrf  = sess.cookies.get("cookie_csrf_token")
-        shash = sess.cookies.get("cookie_sessionhash")
+    })
+    return s
 
-    if not csrf or not shash:
-        raise RuntimeError("无法生成 kukulu token：未拿到 cookie_csrf_token / cookie_sessionhash")
+class TokenRecord:
+    def __init__(self, csrf_token: str, sessionhash: str, ua: str, note: str = ""):
+        self.csrf_token = csrf_token
+        self.sessionhash = sessionhash
+        self.ua = ua or DEFAULT_UA
+        self.note = note
+        self.last_ok_ts = 0.0
+        self.bad_count = 0
 
-    shash = _normalize_shash(shash)
-    return {"csrf_token": csrf, "sessionhash": shash}
+    def to_cookie_jar(self) -> Dict[str, str]:
+        return {
+            "cookie_csrf_token": self.csrf_token,
+            "cookie_sessionhash": self.sessionhash,
+            # 语言可固定 cn/ja，不影响 subtoken 产生，但便于页面解析
+            "cookie_setlang": "cn",
+        }
 
-def _gen_many_tokens(n, proxy=None) -> list:
-    """并发生成 n 个 token；单个失败不影响其它。"""
-    out = []
-    with ThreadPoolExecutor(max_workers=min(PARALLEL_WORKERS, max(1, n))) as ex:
-        futs = [ex.submit(_gen_one_token, proxy=proxy) for _ in range(n)]
-        for fut in as_completed(futs):
+class TokenManager:
+    """
+    - 支持最多5个记录
+    - get_valid()：返回“已验证可用”的 TokenRecord + 当前 subtoken
+    - report_bad()：根据错误码/症状扣分，必要时剔除
+    """
+    def __init__(self, max_size: int = 5, base_url: str = BASE_URL):
+        self.base_url = base_url.rstrip("/")
+        self._lock = threading.Lock()
+        self._items: List[TokenRecord] = []
+
+        self._load_from_env_or_file()
+
+    # ------- 外部接口 -------
+
+    def get_valid(self) -> Tuple[TokenRecord, str]:
+        with self._lock:
+            # 简单 LRU：按 last_ok_ts 排序，优先用最近成功的
+            self._items.sort(key=lambda x: x.last_ok_ts, reverse=True)
+            items = list(self._items)
+
+        last_err = None
+        for rec in items:
+            ok, subtoken = self._validate_and_fetch_subtoken(rec)
+            if ok and subtoken:
+                with self._lock:
+                    rec.last_ok_ts = time.time()
+                    rec.bad_count = 0
+                return rec, subtoken
+            else:
+                last_err = "subtoken-missing"
+
+        raise RuntimeError(f"No valid kukulu tokens (last_error={last_err})")
+
+    def report_bad(self, rec: TokenRecord, reason: str, http_status: Optional[int] = None) -> None:
+        with self._lock:
+            rec.bad_count += 1
+            # 403 / 429 / 连续三次失败：剔除
+            if http_status in (403, 429) or rec.bad_count >= 3:
+                if rec in self._items:
+                    self._items.remove(rec)
+
+    # ------- 内部实现 -------
+
+    def _validate_and_fetch_subtoken(self, rec: TokenRecord) -> Tuple[bool, Optional[str]]:
+        s = _new_session(rec.ua)
+        s.cookies.update(rec.to_cookie_jar())
+        url = f"{self.base_url}{INDEX_PATH}"
+        try:
+            r = s.get(url, timeout=10)
+        except requests.RequestException:
+            return False, None
+
+        if r.status_code != 200:
+            return False, None
+
+        m = SUBTOKEN_RE.search(r.text or "")
+        if not m:
+            return False, None
+
+        return True, m.group(1)
+
+    def _load_from_env_or_file(self) -> None:
+        # 1) 从环境变量载入（支持多组）
+        env_pairs = []
+        for k, v in os.environ.items():
+            if k.startswith("KUKULU_TOKEN_") and "|" in v:
+                env_pairs.append(v)
+
+        # 2) 从 tokens.json 载入（可选）
+        path = os.getenv("KUKULU_TOKENS_FILE", "tokens.json")
+        if os.path.isfile(path):
             try:
-                t = fut.result()
-                if _is_valid_token(t):
-                    out.append(t)
-                time.sleep(0.1)  # 微小抖动
+                data = json.load(open(path, "r", encoding="utf-8"))
+                for item in data:
+                    env_pairs.append(f"{item['csrf_token']}|{item['sessionhash']}|{item.get('ua','')}")
             except Exception:
                 pass
-    return out
 
-def _dedup(tokens: list) -> list:
-    """按 (csrf, sessionhash) 去重"""
-    seen = set()
-    out = []
-    for t in tokens:
-        key = (t.get("csrf_token"), t.get("sessionhash"))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(t)
-    return out
+        # 3) 兼容你 shell 导出的两段变量
+        cs = os.getenv("CSRF")
+        sh = os.getenv("SHASH")
+        if cs and sh:
+            env_pairs.append(f"{cs}|{sh}|")
 
-# ========= 管理类（与 app.py 完全兼容）=========
-class TokenManager:
-    def __init__(self, proxy=None):
-        self.proxy = proxy if proxy is not None else PROXY
-        data = _load_tokens()
-        self.day = data.get("day")  # 上次写入的“日”标记（YYYY-MM-DD）
-        tokens = data.get("tokens") or []
+        # 去重并裁剪
+        uniq = []
+        for row in env_pairs:
+            parts = row.strip().split("|")
+            if len(parts) >= 2:
+                csrf, shash = parts[0].strip(), parts[1].strip()
+                ua = parts[2].strip() if len(parts) >= 3 else DEFAULT_UA
+                if csrf and shash:
+                    uniq.append((csrf, shash, ua))
 
-        # 清洗/修正
-        clean = []
-        for t in tokens:
-            if not t: 
-                continue
-            if t.get("sessionhash"):
-                t["sessionhash"] = _normalize_shash(t["sessionhash"])
-            if _is_valid_token(t):
-                clean.append(t)
-        clean = _dedup(clean)
+        for csrf, shash, ua in uniq[:5]:
+            self._items.append(TokenRecord(csrf, shash, ua))
 
-        # 若是“跨天”或数量不足 → 直接重建今日 token
-        today = _today_key()
-        if (self.day != today) or (len(clean) < TARGET_TOKEN_COUNT):
-            clean = self._rebuild_today_tokens(today)
-        self.tokens = clean
-        self.index = 0
-        self.day = today
-        _save_tokens(self.day, self.tokens)
-
-    def _rebuild_today_tokens(self, today_key: str) -> list:
-        new_tokens = _gen_many_tokens(TARGET_TOKEN_COUNT, proxy=self.proxy)
-        new_tokens = _dedup([t for t in new_tokens if _is_valid_token(t)])
-        # 如果并发生成不足，补齐到目标数量
-        if len(new_tokens) < TARGET_TOKEN_COUNT:
-            need = TARGET_TOKEN_COUNT - len(new_tokens)
-            new_tokens += _gen_many_tokens(need, proxy=self.proxy)
-            new_tokens = _dedup([t for t in new_tokens if _is_valid_token(t)])
-        _save_tokens(today_key, new_tokens)
-        return new_tokens
-
-    def _ensure_today(self):
-        """每次对外取 token 时检查是否跨天，跨天则重建 5 个并覆盖。"""
-        today = _today_key()
-        if today != self.day or len(self.tokens) < TARGET_TOKEN_COUNT:
-            self.tokens = self._rebuild_today_tokens(today)
-            self.day = today
-            self.index = 0
-
-    def get_token(self) -> dict:
-        self._ensure_today()
-        if not self.tokens:
-            # 兜底：再尝试生成 1 个
-            try:
-                t = _gen_one_token(proxy=self.proxy)
-                self.tokens = [t]
-                _save_tokens(self.day or _today_key(), self.tokens)
-            except Exception:
-                return {"csrf_token": None, "sessionhash": None}
-        t = self.tokens[self.index % len(self.tokens)]
-        self.index = (self.index + 1) % max(1, len(self.tokens))
-        return t
-
-    def rotate_token(self) -> dict:
-        """与 app.py 的 fallback 兼容：轮换 + 跨天检测"""
-        return self.get_token()
+        if not self._items:
+            # 允许空启动，但 get_valid 会抛错
+            pass
