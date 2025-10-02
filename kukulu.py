@@ -4,31 +4,16 @@ import re
 import random
 from urllib.parse import quote
 
-class Kukulu():
-    def __init__(self, csrf_token=None, sessionhash=None, proxy=None):
-        self.csrf_token = csrf_token
-        self.sessionhash = sessionhash
-        self.proxy = proxy
+class Kukulu:
+    def __init__(self, proxy=None):
         self.session = requests.Session()
+        self.proxy = proxy
 
-        if csrf_token and sessionhash:
-            self.session.cookies.set("cookie_csrf_token", csrf_token)
-            self.session.cookies.set("cookie_sessionhash", sessionhash)
-            self.session.cookies.set("cookie_setlang", "cn")
-            self.session.cookies.set("cookie_keepalive_insert", "1")
+        self.csrf_token = None
+        self.sessionhash = None
 
-        self.default_headers = {
-            "User-Agent": self._random_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": random.choice([
-                "en-US,en;q=0.5",
-                "zh-CN,zh;q=0.9",
-                "ja,en-US;q=0.9,en;q=0.8",
-            ]),
-            "Connection": "keep-alive",
-        }
-
-        self.session.post("https://m.kuku.lu", proxies=self.proxy, headers=self.default_headers)
+        # 初始化：先访问主页设置 Cookie
+        self._initialize_cookies()
 
     def _random_user_agent(self):
         ua_list = [
@@ -39,79 +24,89 @@ class Kukulu():
         ]
         return random.choice(ua_list)
 
-    def new_account(self):
-        return {
-            "csrf_token": self.session.cookies.get("cookie_csrf_token"),
-            "sessionhash": self.session.cookies.get("cookie_sessionhash"),
+    def _initialize_cookies(self):
+        headers = {
+            "User-Agent": self._random_user_agent(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         }
+        self.session.get("https://m.kuku.lu", headers=headers, proxies=self.proxy)
 
     def create_mailaddress(self):
         url = "https://m.kuku.lu/index.php?action=addMailAddrByAuto&nopost=1&by_system=1"
-        resp = self.session.get(url, proxies=self.proxy, headers=self.default_headers)
-        return resp.text[3:]
+        headers = {
+            "User-Agent": self._random_user_agent(),
+            "Accept": "*/*",
+            "Referer": "https://m.kuku.lu/",
+        }
+        response = self.session.get(url, headers=headers, proxies=self.proxy)
 
-    def specify_address(self, address):
-        url = f"https://m.kuku.lu/index.php?action=addMailAddrByManual&nopost=1&by_system=1&csrf_token_check={self.csrf_token}&newdomain={address}"
-        resp = self.session.get(url, proxies=self.proxy, headers=self.default_headers)
-        return resp.text[3:]
+        self.csrf_token = self.session.cookies.get("cookie_csrf_token")
+        self.sessionhash = self.session.cookies.get("cookie_sessionhash")
+
+        return response.text[3:]  # 去掉开头的 "OK:"
 
     def check_top_mail(self, mailaddress):
-        from datetime import datetime
         encoded = quote(mailaddress)
         inbox_url = f"https://kuku.lu/mailbox/{encoded}"
+
+        headers = {
+            "User-Agent": self._random_user_agent(),
+            "Referer": inbox_url,
+            "Origin": "https://m.kuku.lu",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+
         try:
-            headers = {
-                "User-Agent": self._random_user_agent(),
-                "Referer": inbox_url,
-                "Origin": "https://m.kuku.lu",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            }
+            # Step 1: 加载收件箱页面
+            resp = self.session.get(inbox_url, headers=headers, timeout=10)
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Step 1: 请求收件箱
-            inbox_resp = self.session.get(inbox_url, headers=headers, timeout=10)
-
-            # 💾 把 HTML 保存到文件
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_name = f"debug_inbox_{ts}.html"
-            with open(file_name, "w", encoding="utf-8") as f:
-                f.write(inbox_resp.text)
-            print(f"[DEBUG] 已保存收件箱 HTML 到: {file_name}")
-
-            # Step 2: 提取邮件详情链接（新版结构）
-            soup = BeautifulSoup(inbox_resp.text, "html.parser")
-            a_tags = soup.find_all("a", href=re.compile(r"smphone\.app\.recv\.view\.php\?num=\d+&key=\w+"))
+            # Step 2: 抓邮件链接
+            a_tags = soup.find_all("a", href=re.compile(r"smphone\\.app\\.recv\\.view\\.php\\?num=\\d+&key=\\w+"))
             for a in a_tags:
-                href = a["href"]
-                match = re.search(r"num=(\d+)&key=([a-zA-Z0-9]+)", href)
+                href = a.get("href")
+                match = re.search(r"num=(\\d+)&key=([a-zA-Z0-9]+)", href)
                 if not match:
                     continue
                 num, key = match.groups()
 
-                # Step 3: 发起 POST 获取邮件内容
-                resp = self.session.post(
+                # Step 3: 请求邮件内容（POST）
+                post_resp = self.session.post(
                     "https://m.kuku.lu/smphone.app.recv.view.php",
                     data={"num": num, "key": key, "noscroll": "1"},
                     headers=headers,
                     timeout=10
                 )
 
-                print("[DEBUG] 响应状态码:", resp.status_code)
-                print("[DEBUG] 响应正文前500字符 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓")
-                print(resp.text[:500])
-                print("↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑")
-
-                if resp.status_code != 200:
-                    continue
-
-                soup_detail = BeautifulSoup(resp.text, "html.parser")
+                # Step 4: 提取验证码
+                soup_detail = BeautifulSoup(post_resp.text, "html.parser")
                 text = soup_detail.get_text()
-                code = re.search(r"\b\d{6}\b", text)
-                if code:
-                    return code.group()
+                code_match = re.search(r"\\b\\d{6}\\b", text)
+                if code_match:
+                    return code_match.group()
 
         except Exception as e:
-            print(f"[ERROR] check_top_mail failed: {e}")
+            print(f"[ERROR] check_top_mail() 失败: {e}")
 
         return None
+
+if __name__ == "__main__":
+    kukulu = Kukulu()
+    mail = kukulu.create_mailaddress()
+    print(f"✅ 创建邮箱: {mail}")
+
+    print("⏳ 等待接收验证码中...")
+    import time
+    for i in range(30):
+        code = kukulu.check_top_mail(mail)
+        if code:
+            print(f"🎉 收到验证码: {code}")
+            break
+        else:
+            print(f"[尝试 {i+1}/30] 暂无新邮件，等待 3 秒...")
+            time.sleep(3)
+    else:
+        print("❌ 未收到验证码")
