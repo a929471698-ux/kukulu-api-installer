@@ -56,6 +56,7 @@ class Kukulu():
         return resp.text[3:]
 
     def check_top_mail(self, mailaddress):
+        from datetime import datetime
         encoded = quote(mailaddress)
         inbox_url = f"https://kuku.lu/mailbox/{encoded}"
         try:
@@ -70,9 +71,16 @@ class Kukulu():
 
             # Step 1: 请求收件箱
             inbox_resp = self.session.get(inbox_url, headers=headers, timeout=10)
-            soup = BeautifulSoup(inbox_resp.text, "html.parser")
+
+            # 💾 把 HTML 保存到文件
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_name = f"debug_inbox_{ts}.html"
+            with open(file_name, "w", encoding="utf-8") as f:
+                f.write(inbox_resp.text)
+            print(f"[DEBUG] 已保存收件箱 HTML 到: {file_name}")
 
             # Step 2: 提取邮件详情链接（新版结构）
+            soup = BeautifulSoup(inbox_resp.text, "html.parser")
             a_tags = soup.find_all("a", href=re.compile(r"smphone\.app\.recv\.view\.php\?num=\d+&key=\w+"))
             for a in a_tags:
                 href = a["href"]
