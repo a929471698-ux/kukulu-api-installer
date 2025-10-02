@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+import random
 from urllib.parse import quote
 
 class Kukulu():
@@ -9,66 +10,90 @@ class Kukulu():
         self.sessionhash = sessionhash
         self.proxy = proxy
         self.session = requests.Session()
+
+        # 设置 cookie 模拟登录
         if csrf_token and sessionhash:
             self.session.cookies.set("cookie_csrf_token", csrf_token)
             self.session.cookies.set("cookie_sessionhash", sessionhash)
-            self.session.post("https://m.kuku.lu", proxies=proxy)
-        else:
-            self.session.post("https://m.kuku.lu", proxies=proxy)
+
+        # 设置随机默认 headers（浏览器伪装）
+        self.default_headers = {
+            "User-Agent": self._random_user_agent(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": random.choice([
+                "en-US,en;q=0.5",
+                "ja,en-US;q=0.9,en;q=0.8",
+                "zh-CN,zh;q=0.9,en;q=0.8",
+            ]),
+            "Connection": "keep-alive",
+        }
+
+        # 初始化 session（请求主页模拟一次访问）
+        self.session.post("https://m.kuku.lu", proxies=self.proxy, headers=self.default_headers)
+
+    def _random_user_agent(self):
+        ua_list = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/113.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/117.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/110.0.0.0 Safari/537.36",
+        ]
+        return random.choice(ua_list)
 
     def new_account(self):
         return {
-            "csrf_token": self.session.cookies["cookie_csrf_token"],
-            "sessionhash": self.session.cookies["cookie_sessionhash"]
+            "csrf_token": self.session.cookies.get("cookie_csrf_token"),
+            "sessionhash": self.session.cookies.get("cookie_sessionhash"),
         }
 
     def create_mailaddress(self):
-        return self.session.get(
-            "https://m.kuku.lu/index.php?action=addMailAddrByAuto&nopost=1&by_system=1",
-            proxies=self.proxy
-        ).text[3:]
+        url = "https://m.kuku.lu/index.php?action=addMailAddrByAuto&nopost=1&by_system=1"
+        resp = self.session.get(url, proxies=self.proxy, headers=self.default_headers)
+        return resp.text[3:]  # 去掉前缀 "OK:"
 
     def specify_address(self, address):
-        return self.session.get(
-            f"https://m.kuku.lu/index.php?action=addMailAddrByManual&nopost=1&by_system=1&t=1716696234&csrf_token_check={self.csrf_token}&newdomain={address}",
-            proxies=self.proxy
-        ).text[3:]
+        url = f"https://m.kuku.lu/index.php?action=addMailAddrByManual&nopost=1&by_system=1&t=1716696234&csrf_token_check={self.csrf_token}&newdomain={address}"
+        resp = self.session.get(url, proxies=self.proxy, headers=self.default_headers)
+        return resp.text[3:]
 
     def check_top_mail(self, mailaddress):
         encoded = quote(mailaddress)
         inbox_url = f"https://kuku.lu/mailbox/{encoded}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        }
+
+        inbox_headers = dict(self.default_headers)
+        inbox_headers["Referer"] = inbox_url
 
         try:
-            # Step 1: 获取收件箱页面
-            inbox_resp = self.session.get(inbox_url, headers=headers, timeout=10)
-            soup = BeautifulSoup(inbox_resp.text, "html.parser")
+            # Step 1: 收件箱页面
+            resp = self.session.get(inbox_url, headers=inbox_headers, timeout=10, proxies=self.proxy)
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Step 2: 提取邮件链接（POST 参数）
-            view_links = soup.select("a[href*='smphone.app.recv.view.php']")
-            if not view_links:
+            # Step 2: 找邮件链接中的 num 和 key
+            links = soup.select("a[href*='smphone.app.recv.view.php']")
+            if not links:
                 return None
 
-            for link in view_links:
+            for link in links:
                 href = link.get("href")
                 match = re.search(r"num=(\d+)&key=([a-zA-Z0-9]+)", href)
                 if not match:
                     continue
                 num, key = match.groups()
 
-                # Step 3: 访问邮件详情内容（POST）
-                detail_url = "https://kuku.lu/smphone.app.recv.view.php"
-                detail_resp = self.session.post(detail_url, data={
+                # Step 3: 构造 POST 请求获取邮件内容
+                post_url = "https://kuku.lu/smphone.app.recv.view.php"
+                post_data = {
                     "num": num,
                     "key": key,
-                    "noscroll": "1"
-                }, headers=headers, timeout=10)
+                    "noscroll": "1",
+                }
+                detail_headers = dict(inbox_headers)
+                detail_headers["Origin"] = "https://kuku.lu"
+                detail_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-                # Step 4: 提取正文中的验证码
-                mail_soup = BeautifulSoup(detail_resp.text, "html.parser")
-                text = mail_soup.get_text()
+                resp = self.session.post(post_url, data=post_data, headers=detail_headers, timeout=10, proxies=self.proxy)
+                soup_detail = BeautifulSoup(resp.text, "html.parser")
+                text = soup_detail.get_text()
                 code = re.search(r"\b\d{6}\b", text)
                 if code:
                     return code.group()
