@@ -35,20 +35,45 @@ class Kukulu():
         ).text[3:]
 
     def check_top_mail(self, mailaddress):
-        encoded_mail = quote(mailaddress)
-        url = f"https://kuku.lu/mailbox/{encoded_mail}"
-        resp = self.session.get(url, proxies=self.proxy, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        encoded = quote(mailaddress)
+        inbox_url = f"https://kuku.lu/mailbox/{encoded}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        }
 
-        # 新版 kukulu 页面适配（多个 class，向后兼容）
-        mail_divs = soup.select("div.mail_item, div.mail_body, div.mailcontent")
-        if not mail_divs:
-            return None
+        try:
+            # Step 1: 获取收件箱页面
+            inbox_resp = self.session.get(inbox_url, headers=headers, timeout=10)
+            soup = BeautifulSoup(inbox_resp.text, "html.parser")
 
-        for div in mail_divs:
-            text = div.get_text()
-            code = re.search(r"\b\d{6}\b", text)
-            if code:
-                return code.group()
+            # Step 2: 提取邮件链接（POST 参数）
+            view_links = soup.select("a[href*='smphone.app.recv.view.php']")
+            if not view_links:
+                return None
+
+            for link in view_links:
+                href = link.get("href")
+                match = re.search(r"num=(\d+)&key=([a-zA-Z0-9]+)", href)
+                if not match:
+                    continue
+                num, key = match.groups()
+
+                # Step 3: 访问邮件详情内容（POST）
+                detail_url = "https://kuku.lu/smphone.app.recv.view.php"
+                detail_resp = self.session.post(detail_url, data={
+                    "num": num,
+                    "key": key,
+                    "noscroll": "1"
+                }, headers=headers, timeout=10)
+
+                # Step 4: 提取正文中的验证码
+                mail_soup = BeautifulSoup(detail_resp.text, "html.parser")
+                text = mail_soup.get_text()
+                code = re.search(r"\b\d{6}\b", text)
+                if code:
+                    return code.group()
+
+        except Exception as e:
+            print(f"[ERROR] check_top_mail failed: {e}")
 
         return None
