@@ -1,4 +1,4 @@
-# kukulu.py  —— 只替换本文件；app.py 和面板逻辑一律不改
+# kukulu.py —— 只替换本文件；app.py/面板/API 不改
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -12,14 +12,12 @@ class Kukulu():
         self.proxy       = proxy
         self.session     = requests.Session()
 
-        # 仅在 m.kuku.lu 域设置关键 Cookie（创建/收件核心都发生在 m 站）
+        # 只在 m.kuku.lu 域设置关键 Cookie（创建/收件核心都发生在 m 站）
         if csrf_token:
             self.session.cookies.set("cookie_csrf_token", csrf_token, domain="m.kuku.lu", path="/")
         if sessionhash:
             shash = sessionhash.replace("%3A", ":") if "%3A" in sessionhash else sessionhash
             self.session.cookies.set("cookie_sessionhash", shash, domain="m.kuku.lu", path="/")
-
-        # 常见偏好
         self.session.cookies.set("cookie_setlang", "cn", domain="m.kuku.lu", path="/")
         self.session.cookies.set("cookie_keepalive_insert", "1", domain="m.kuku.lu", path="/")
 
@@ -34,7 +32,7 @@ class Kukulu():
             "Connection": "keep-alive",
         }
 
-        # 预热 m.kuku.lu（失败不抛）
+        # 预热（失败不抛）
         try:
             self.session.get("https://m.kuku.lu", headers=self.default_headers, timeout=10, proxies=self.proxy)
         except Exception:
@@ -54,37 +52,55 @@ class Kukulu():
             "sessionhash": self.session.cookies.get("cookie_sessionhash"),
         }
 
-    # === 稳定：创建邮箱 — 三步短路 ===
+    # ============ 创建邮箱：多路径 + 明确失败原因（打印到日志） ============
     def create_mailaddress(self):
         """
-        顺序：
         1) 标准：addMailAddrByAuto & nopost=1 & by_system=1 & csrf_token_check
-        2) 备用：去掉 nopost（有时被拦）
-        3) 兜底：返回体中直接正则提邮箱（不少响应会把地址渲染到文中）
-        命中任一路线即返回，不再做多域 cookie 操作，避免状态干扰。
+        2) 去掉 nopost
+        3) 强头再试（Referer/Sec-Fetch/Upgrade）
+        4) 兜底：直接从 index.php 文本里正则提邮箱
+        命中任一路即返回；否则打印失败原因并返回 ""。
         """
-        def _try(url, extra_headers=None):
-            hdr = dict(self.default_headers)
-            if extra_headers:
-                hdr.update(extra_headers)
-            r = self.session.get(url, proxies=self.proxy, headers=hdr, timeout=15)
-            txt = r.text.strip()
-            if txt.startswith("OK:") and "@" in txt:      # 正常返回
-                return txt[3:].strip()
+        def _extract_email(txt: str) -> str:
             m = re.search(r"[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", txt)
             return m.group(0) if m else ""
+
+        def _hit_ok(txt: str) -> str:
+            if txt.startswith("OK:") and "@" in txt:
+                return txt[3:].strip()
+            return ""
+
+        def _try(url, extra_headers=None, tag=""):
+            hdr = dict(self.default_headers)
+            if extra_headers: hdr.update(extra_headers)
+            r = self.session.get(url, proxies=self.proxy, headers=hdr, timeout=15)
+            txt = (r.text or "").strip()
+            # 1) 正常 OK:
+            mail = _hit_ok(txt)
+            if mail:
+                return mail
+            # 2) 兜底从文本提邮箱
+            mail = _extract_email(txt)
+            if mail:
+                return mail
+            # 3) 打印失败原因（不落盘）
+            reason = []
+            if r.status_code != 200:
+                reason.append(f"HTTP {r.status_code}")
+            t_low = txt[:200].lower()
+            if "just a moment" in t_low or "cloudflare" in t_low:
+                reason.append("CLOUDFLARE")
+            if "短縮url作成" in txt or "kuku.lu 短縮url作成" in txt:
+                reason.append("HOMEPAGE")
+            if not reason:
+                reason.append("NO_EMAIL_IN_RESPONSE")
+            print(f"[create_mailaddress][{tag}] fail: {', '.join(reason)}")
+            return ""
 
         base = "https://m.kuku.lu/index.php?action=addMailAddrByAuto&by_system=1"
         qs1  = "&nopost=1"
         ctp  = f"&csrf_token_check={self.csrf_token}" if self.csrf_token else ""
 
-        # 标准
-        mail = _try(base + qs1 + ctp)
-        if mail: return mail
-        # 去 nopost
-        mail = _try(base + ctp)
-        if mail: return mail
-        # 强 Referer 头再试（常见 Cloudflare/Sec-Fetch 轻拦截）
         strong_headers = {
             "Referer": "https://m.kuku.lu/index.php",
             "Sec-Fetch-Site": "same-origin",
@@ -92,40 +108,42 @@ class Kukulu():
             "Sec-Fetch-Dest": "document",
             "Upgrade-Insecure-Requests": "1",
         }
-        mail = _try(base + qs1 + ctp, strong_headers)
-        if mail: return mail
-        mail = _try(base + ctp, strong_headers)
-        if mail: return mail
 
-        # 兜底：直接请求 index.php，从页面文本里找邮箱
+        # 顺序尝试
+        for url, tag in (
+            (base + qs1 + ctp, "std+nopost"),
+            (base + ctp,       "std"),
+            (base + qs1 + ctp, "strong+nopost"),
+            (base + ctp,       "strong"),
+        ):
+            mail = _try(url, None if "strong" not in tag else strong_headers, tag)
+            if mail:
+                return mail
+
+        # 兜底：从 index.php 把当前会话“已有地址”抠出来
         try:
             r = self.session.get("https://m.kuku.lu/index.php", headers=self.default_headers, timeout=15, proxies=self.proxy)
-            m = re.search(r"[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r.text)
-            if m:
-                return m.group(0)
-        except Exception:
-            pass
+            mail = _extract_email(r.text or "")
+            if mail:
+                return mail
+            print("[create_mailaddress][index] fail: NO_EMAIL_IN_INDEX")
+        except Exception as e:
+            print(f"[create_mailaddress][index] exception: {e}")
 
-        return ""  # 最终失败
+        return ""
 
     def specify_address(self, address):
         url = f"https://m.kuku.lu/index.php?action=addMailAddrByManual&by_system=1&csrf_token_check={self.csrf_token}&newdomain={address}"
         r = self.session.get(url, proxies=self.proxy, headers=self.default_headers, timeout=15)
-        txt = r.text.strip()
+        txt = (r.text or "").strip()
         if txt.startswith("OK:") and "@" in txt:
             return txt[3:].strip()
         m = re.search(r"[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", txt)
         return m.group(0) if m else ""
 
-    # === 保持原行为：获取验证码 ===
+    # ============ 获取验证码：行为保持不变（桌面→移动回退） ============
     def check_top_mail(self, mailaddress):
-        """
-        行为保持不变：
-        - 桌面页提取 num/key（a[href] + 全文正则）
-        - 失败 → 回退移动 AJAX（含 openMailData('num','key',...) 解析）
-        - 详情页 POST smphone.app.recv.view.php，正则提 6 位验证码
-        """
-        # 轻量声明当前邮箱（仅 m.kuku.lu）；避免过度写跨域状态引发风控
+        # 轻量声明当前邮箱（仅 m.kuku.lu），避免过度跨域cookie
         self.session.cookies.set("cookie_last_q", mailaddress, domain="m.kuku.lu", path="/")
 
         encoded   = quote(mailaddress)
@@ -144,36 +162,32 @@ class Kukulu():
         }
 
         try:
-            # 1) 桌面页
+            # 桌面页
             inbox_resp = self.session.get(inbox_url, headers=headers, proxies=self.proxy, timeout=15)
             soup = BeautifulSoup(inbox_resp.text, "html.parser")
 
             candidates = []
-            # a[href] 优先
             for a in soup.find_all("a", href=True):
                 m = re.search(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", a["href"])
                 if m:
                     candidates.append(m.groups())
-            # 全文兜底
             if not candidates:
                 candidates += re.findall(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", inbox_resp.text)
 
-            # 2) 移动 AJAX 回退（需要 csrf_token）
+            # 移动 AJAX 回退（需要 csrf_token）
             if not candidates and self.csrf_token:
                 ajax_url = (
                     "https://m.kuku.lu/recv._ajax.php?"
                     f"q={quote(mailaddress)}&nopost=1&csrf_token_check={self.csrf_token}"
                 )
                 ajax_resp = self.session.get(ajax_url, headers=self.default_headers, proxies=self.proxy, timeout=15)
-                # URL 形态
                 candidates += re.findall(r"smphone\.app\.recv\.view\.php\?num=(\d+)&key=([A-Za-z0-9]+)", ajax_resp.text)
-                # openMailData 形态
                 candidates += re.findall(r"openMailData\('(\d+)'\s*,\s*'([0-9a-fA-F]+)'\s*,", ajax_resp.text)
 
             if not candidates:
                 return None
 
-            # 3) 详情正文
+            # 详情正文
             detail_url = "https://m.kuku.lu/smphone.app.recv.view.php"
             for num, key in candidates:
                 resp = self.session.post(
