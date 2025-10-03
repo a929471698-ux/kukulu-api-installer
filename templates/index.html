@@ -8,21 +8,12 @@
 </head>
 <body class="p-4">
 <div class="container">
-  <h3>📬 Kukulu 收件记录控制台 v3</h3>
+  <h3>📬 Kukulu 收件记录控制台</h3>
 
   <div class="mb-3">
     <button class="btn btn-primary me-2" onclick="createMailbox(false)">创建邮箱（随机后缀）</button>
-    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀池随机）</button>
+    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
     <button class="btn btn-success" onclick="refreshSelected()">刷新所选邮箱</button>
-  </div>
-
-  <div class="card mb-4">
-    <div class="card-header">后缀池管理</div>
-    <div class="card-body">
-      <textarea id="domains" class="form-control" rows="4" placeholder="每行一个后缀..."></textarea>
-      <button class="btn btn-outline-primary mt-2" onclick="saveDomains()">保存</button>
-      <span id="domMsg" class="ms-2 text-muted"></span>
-    </div>
   </div>
 
   <table class="table table-bordered">
@@ -92,25 +83,6 @@ async function refreshMail(mail, force){
 function refreshSelected(){
   historyList.forEach(mail => refreshMail(mail, true));
 }
-
-async function loadDomains(){
-  const r = await fetch('/api/domains');
-  if(!r.ok){ document.getElementById('domMsg').innerText = '加载失败'; return; }
-  const d = await r.json();
-  document.getElementById('domains').value = (d.domains || []).join("\n");
-  document.getElementById('domMsg').innerText = '已加载';
-}
-
-async function saveDomains(){
-  const list = document.getElementById('domains').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
-  const r = await fetch('/api/domains', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(list)
-  });
-  document.getElementById('domMsg').innerText = r.ok ? '保存成功' : ('保存失败：'+r.status);
-}
-
-// 初始化
-loadDomains();
 </script>
 </body>
 </html>
