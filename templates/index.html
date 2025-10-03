@@ -14,8 +14,6 @@
     <button class="btn btn-primary me-2" onclick="createMailbox(false)">创建邮箱（随机后缀）</button>
     <button class="btn btn-secondary" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
     <button class="btn btn-outline-dark ms-2" onclick="loadHistory()">刷新记录</button>
-    <button class="btn btn-danger ms-2" onclick="refreshAll()">批量刷新全部邮箱</button>
-    <span id="batchStatus" class="ms-2 text-muted"></span>
   </div>
 
   <div class="card mb-4">
@@ -33,15 +31,7 @@
   </div>
 
   <table class="table table-bordered">
-    <thead>
-      <tr>
-        <th style="width:60px">#</th>
-        <th>邮箱地址</th>
-        <th style="width:220px">验证码</th>
-        <th style="width:220px">时间</th>
-        <th>操作</th>
-      </tr>
-    </thead>
+    <thead><tr><th style="width:60px">#</th><th>邮箱地址</th><th style="width:220px">验证码</th><th style="width:220px">时间</th></tr></thead>
     <tbody id="history"></tbody>
   </table>
 </div>
@@ -54,14 +44,14 @@ document.getElementById('apiLinks').innerHTML = `
 - 获取验证码（示例）：<code>http://${host}/api/check_captcha/xxxx@xxxx</code>
 `;
 
-let historyList = [];
-
 async function createMailbox(useCustom){
   const url = useCustom ? '/api/create_custom' : '/api/create_random';
   const r = await fetch(url);
   const d = await r.json();
   if (d.mailaddress){
+    // 立即插入一行，并尝试拉验证码
     prependRow({mailaddress:d.mailaddress, ts: Date.now()/1000});
+    fetchCode(d.mailaddress);
   } else {
     alert(d.error || '创建失败');
   }
@@ -89,9 +79,7 @@ function prependRow(item){
     <td class="idx"></td>
     <td>${item.mailaddress}</td>
     <td class="code">-</td>
-    <td>${fmt(item.ts)}</td>
-    <td><button class="btn btn-sm btn-outline-success" onclick="fetchCode('${item.mailaddress}')">刷新</button></td>
-  `;
+    <td>${fmt(item.ts)}</td>`;
   tbody.prepend(tr);
   renumber();
 }
@@ -112,28 +100,10 @@ async function loadHistory(){
       <td class="idx"></td>
       <td>${item.mailaddress}</td>
       <td class="code">-</td>
-      <td>${fmt(item.ts)}</td>
-      <td><button class="btn btn-sm btn-outline-success" onclick="fetchCode('${item.mailaddress}')">刷新</button></td>
-    `;
+      <td>${fmt(item.ts)}</td>`;
     tbody.appendChild(tr);
   });
   renumber();
-}
-
-// 批量刷新
-async function refreshAll(){
-  const rows = document.querySelectorAll('#history tr');
-  const status = document.getElementById('batchStatus');
-  let i = 0;
-  for (let tr of rows){
-    const mail = tr.getAttribute('data-mail');
-    if(mail){
-      await fetchCode(mail);
-      i++;
-      status.innerText = `刷新进度：${i}/${rows.length}`;
-    }
-  }
-  status.innerText = "批量刷新完成 ✅";
 }
 
 async function loadDomains(){
@@ -155,6 +125,13 @@ async function saveDomains(){
 // 初始化
 loadDomains();
 loadHistory();
+// 可选：定时刷新验证码
+setInterval(()=>{
+  document.querySelectorAll('#history tr').forEach(tr=>{
+    const mail = tr.getAttribute('data-mail');
+    if (mail) fetchCode(mail);
+  });
+}, 60000);
 </script>
 </body>
 </html>
