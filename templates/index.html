@@ -8,12 +8,21 @@
 </head>
 <body class="p-4">
 <div class="container">
-  <h3>📬 Kukulu 收件记录控制台</h3>
+  <h3>📬 Kukulu 收件记录控制台 v3</h3>
 
   <div class="mb-3">
     <button class="btn btn-primary me-2" onclick="createMailbox(false)">创建邮箱（随机后缀）</button>
-    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
+    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀池随机）</button>
     <button class="btn btn-success" onclick="refreshSelected()">刷新所选邮箱</button>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">后缀池管理</div>
+    <div class="card-body">
+      <textarea id="domains" class="form-control" rows="4" placeholder="每行一个后缀..."></textarea>
+      <button class="btn btn-outline-primary mt-2" onclick="saveDomains()">保存</button>
+      <span id="domMsg" class="ms-2 text-muted"></span>
+    </div>
   </div>
 
   <table class="table table-bordered">
@@ -83,94 +92,25 @@ async function refreshMail(mail, force){
 function refreshSelected(){
   historyList.forEach(mail => refreshMail(mail, true));
 }
-</script>
-</body>
-</html>
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Kukulu 收件记录控制台</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-</head>
-<body class="p-4">
-<div class="container">
-  <h3>📬 Kukulu 收件记录控制台</h3>
 
-  <div class="mb-3">
-    <button class="btn btn-primary me-2" onclick="createMailbox(false)">创建邮箱（随机后缀）</button>
-    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
-    <button class="btn btn-success" onclick="refreshSelected()">刷新所选邮箱</button>
-  </div>
-
-  <table class="table table-bordered">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>邮箱地址</th>
-        <th>验证码</th>
-        <th>正文</th>
-        <th>Cached</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody id="history"></tbody>
-  </table>
-</div>
-
-<script>
-let historyList = [];
-
-async function createMailbox(useCustom){
-  const url = useCustom ? '/api/create_custom' : '/api/create_random';
-  const r = await fetch(url);
+async function loadDomains(){
+  const r = await fetch('/api/domains');
+  if(!r.ok){ document.getElementById('domMsg').innerText = '加载失败'; return; }
   const d = await r.json();
-  if(d.mailaddress){
-    addRow(d.mailaddress);
-  } else {
-    alert("创建失败: " + (d.error || '未知错误'));
-  }
+  document.getElementById('domains').value = (d.domains || []).join("\n");
+  document.getElementById('domMsg').innerText = '已加载';
 }
 
-function addRow(mail){
-  historyList.push(mail);
-  const tbody = document.getElementById('history');
-  const tr = document.createElement('tr');
-  tr.setAttribute('data-mail', mail);
-  tr.innerHTML = `
-    <td>${historyList.length}</td>
-    <td>${mail}</td>
-    <td class="code">-</td>
-    <td class="body">-</td>
-    <td class="cached">-</td>
-    <td><button class="btn btn-sm btn-outline-success" onclick="refreshMail('${mail}', true)">刷新</button></td>
-  `;
-  tbody.appendChild(tr);
+async function saveDomains(){
+  const list = document.getElementById('domains').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const r = await fetch('/api/domains', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(list)
+  });
+  document.getElementById('domMsg').innerText = r.ok ? '保存成功' : ('保存失败：'+r.status);
 }
 
-// 自动刷新（只走缓存）
-setInterval(()=>{
-  historyList.forEach(mail => refreshMail(mail, false));
-}, 8000);
-
-async function refreshMail(mail, force){
-  let url = `/api/check_captcha/${encodeURIComponent(mail)}`;
-  if(force) url += "?refresh=1";
-  const r = await fetch(url);
-  const d = await r.json();
-  const tr = document.querySelector(`tr[data-mail='${mail}']`);
-  if(tr){
-    tr.querySelector('.code').innerText = d.code || '-';
-    tr.querySelector('.body').innerText = d.body ? d.body.slice(0,50) : '-';
-    tr.querySelector('.cached').innerText = d.cached ? "缓存" : "新查";
-    tr.querySelector('.cached').style.color = d.cached ? "green" : "red";
-  }
-}
-
-function refreshSelected(){
-  historyList.forEach(mail => refreshMail(mail, true));
-}
+// 初始化
+loadDomains();
 </script>
 </body>
 </html>
