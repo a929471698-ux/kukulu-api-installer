@@ -2,28 +2,43 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Kukulu 收件记录控制台</title>
+  <title>船长 收件记录控制台</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
 </head>
 <body class="p-4">
 <div class="container">
-  <h3>📬 Kukulu 收件记录控制台</h3>
+  <h3>📬 船长 收件记录控制台</h3>
 
   <div class="mb-3">
     <button class="btn btn-primary me-2" onclick="createMailbox(false)">创建邮箱（随机后缀）</button>
-    <button class="btn btn-secondary me-2" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
-    <button class="btn btn-success" onclick="refreshSelected()">刷新所选邮箱</button>
+    <button class="btn btn-secondary" onclick="createMailbox(true)">创建邮箱（自定义后缀）</button>
+    <button class="btn btn-outline-dark ms-2" onclick="loadHistory()">刷新记录</button>
+    <button class="btn btn-danger ms-2" onclick="refreshAll()">批量刷新全部邮箱</button>
+    <span id="batchStatus" class="ms-2 text-muted"></span>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">后缀池管理（无密钥）</div>
+    <div class="card-body">
+      <textarea id="domains" class="form-control" rows="4" placeholder="每行一个后缀..."></textarea>
+      <button class="btn btn-success mt-2" onclick="saveDomains()">保存</button>
+      <span id="domMsg" class="ms-2 text-muted"></span>
+    </div>
+  </div>
+
+  <div class="alert alert-info">
+    <b>API 调用示例：</b>
+    <div id="apiLinks" class="mt-1 small"></div>
   </div>
 
   <table class="table table-bordered">
     <thead>
       <tr>
-        <th>#</th>
+        <th style="width:60px">#</th>
         <th>邮箱地址</th>
-        <th>验证码</th>
-        <th>正文</th>
-        <th>Cached</th>
+        <th style="width:220px">验证码</th>
+        <th style="width:220px">时间</th>
         <th>操作</th>
       </tr>
     </thead>
@@ -32,57 +47,114 @@
 </div>
 
 <script>
+const host = window.location.host;
+document.getElementById('apiLinks').innerHTML = `
+- 随机邮箱：<code>http://${host}/api/create_random</code><br>
+- 指定后缀邮箱：<code>http://${host}/api/create_custom</code><br>
+- 获取验证码（示例）：<code>http://${host}/api/check_captcha/xxxx@xxxx</code>
+`;
+
 let historyList = [];
 
 async function createMailbox(useCustom){
   const url = useCustom ? '/api/create_custom' : '/api/create_random';
   const r = await fetch(url);
   const d = await r.json();
-  if(d.mailaddress){
-    addRow(d.mailaddress);
+  if (d.mailaddress){
+    prependRow({mailaddress:d.mailaddress, ts: Date.now()/1000});
   } else {
-    alert("创建失败: " + (d.error || '未知错误'));
+    alert(d.error || '创建失败');
   }
 }
 
-function addRow(mail){
-  historyList.push(mail);
+async function fetchCode(mail){
+  const cell = document.querySelector(`[data-mail="${mail}"] .code`);
+  if(cell) cell.innerText = '查询中...';
+  const r = await fetch('/api/check_captcha/' + encodeURIComponent(mail));
+  const d = await r.json();
+  if(cell) cell.innerText = (d.code || '未获取');
+}
+
+function fmt(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000);
+  return d.toLocaleString();
+}
+
+function prependRow(item){
   const tbody = document.getElementById('history');
   const tr = document.createElement('tr');
-  tr.setAttribute('data-mail', mail);
+  tr.setAttribute('data-mail', item.mailaddress);
   tr.innerHTML = `
-    <td>${historyList.length}</td>
-    <td>${mail}</td>
+    <td class="idx"></td>
+    <td>${item.mailaddress}</td>
     <td class="code">-</td>
-    <td class="body">-</td>
-    <td class="cached">-</td>
-    <td><button class="btn btn-sm btn-outline-success" onclick="refreshMail('${mail}', true)">刷新</button></td>
+    <td>${fmt(item.ts)}</td>
+    <td><button class="btn btn-sm btn-outline-success" onclick="fetchCode('${item.mailaddress}')">刷新</button></td>
   `;
-  tbody.appendChild(tr);
+  tbody.prepend(tr);
+  renumber();
 }
 
-// 自动刷新（只走缓存）
-setInterval(()=>{
-  historyList.forEach(mail => refreshMail(mail, false));
-}, 8000);
+function renumber(){
+  document.querySelectorAll('#history .idx').forEach((td,i)=>td.innerText = i+1);
+}
 
-async function refreshMail(mail, force){
-  let url = `/api/check_captcha/${encodeURIComponent(mail)}`;
-  if(force) url += "?refresh=1";
-  const r = await fetch(url);
+async function loadHistory(){
+  const r = await fetch('/api/history');
   const d = await r.json();
-  const tr = document.querySelector(`tr[data-mail='${mail}']`);
-  if(tr){
-    tr.querySelector('.code').innerText = d.code || '-';
-    tr.querySelector('.body').innerText = d.body ? d.body.slice(0,50) : '-';
-    tr.querySelector('.cached').innerText = d.cached ? "缓存" : "新查";
-    tr.querySelector('.cached').style.color = d.cached ? "green" : "red";
-  }
+  const tbody = document.getElementById('history');
+  tbody.innerHTML = '';
+  (d.history || []).forEach(item=>{
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-mail', item.mailaddress);
+    tr.innerHTML = `
+      <td class="idx"></td>
+      <td>${item.mailaddress}</td>
+      <td class="code">-</td>
+      <td>${fmt(item.ts)}</td>
+      <td><button class="btn btn-sm btn-outline-success" onclick="fetchCode('${item.mailaddress}')">刷新</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  renumber();
 }
 
-function refreshSelected(){
-  historyList.forEach(mail => refreshMail(mail, true));
+// 批量刷新
+async function refreshAll(){
+  const rows = document.querySelectorAll('#history tr');
+  const status = document.getElementById('batchStatus');
+  let i = 0;
+  for (let tr of rows){
+    const mail = tr.getAttribute('data-mail');
+    if(mail){
+      await fetchCode(mail);
+      i++;
+      status.innerText = `刷新进度：${i}/${rows.length}`;
+    }
+  }
+  status.innerText = "批量刷新完成 ✅";
 }
+
+async function loadDomains(){
+  const r = await fetch('/api/domains');
+  if(!r.ok){ document.getElementById('domMsg').innerText = '加载失败'; return; }
+  const d = await r.json();
+  document.getElementById('domains').value = (d.domains || []).join('\n');
+  document.getElementById('domMsg').innerText = '已加载';
+}
+
+async function saveDomains(){
+  const list = document.getElementById('domains').value.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const r = await fetch('/api/domains', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(list)
+  });
+  document.getElementById('domMsg').innerText = r.ok ? '保存成功' : ('保存失败：'+r.status);
+}
+
+// 初始化
+loadDomains();
+loadHistory();
 </script>
 </body>
 </html>
