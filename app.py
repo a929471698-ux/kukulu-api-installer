@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 from kukulu import Kukulu
 from token_manager import TokenManager
-import logging, os, json, random, time
+import logging, os, random, time
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(APP_DIR, "logs")
@@ -17,8 +17,11 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['JSON_AS_ASCII'] = False
 manager = TokenManager()
 
-# 缓存 {mail: {"code":xxx,"body":xxx,"time":xxx}}
+# 缓存最近一次查询结果 {mail: {"code":..., "body":..., "time":...}}
 cache = {}
+MIN_INTERVAL = 5   # 最小查询间隔秒，避免过于频繁打 Kukulu
+
+CUSTOM_DOMAINS_FILE = os.path.join(APP_DIR, "custom_domains.txt")
 
 @app.route("/api/create_random", methods=["GET"])
 def api_create_random():
@@ -35,7 +38,7 @@ def api_create_random():
 def api_create_custom():
     domains = []
     try:
-        with open(os.path.join(APP_DIR, "custom_domains.txt"), "r", encoding="utf-8") as f:
+        with open(CUSTOM_DOMAINS_FILE, "r", encoding="utf-8") as f:
             domains = [line.strip() for line in f if line.strip()]
     except:
         pass
@@ -55,19 +58,17 @@ def api_create_custom():
 
 @app.route("/api/check_captcha/<path:mailaddr>", methods=["GET"])
 def api_check_captcha(mailaddr):
-    force_refresh = request.args.get("refresh") == "1"
     now = time.time()
-
-    # 有缓存并且没强制刷新 → 直接返回缓存
-    if mailaddr in cache and not force_refresh:
+    # 限频：同一邮箱短时间重复请求 → 返回缓存
+    if mailaddr in cache and now - cache[mailaddr]["time"] < MIN_INTERVAL:
+        result = cache[mailaddr]
         return jsonify({
             "mailaddress": mailaddr,
-            "code": cache[mailaddr]["code"],
-            "body": cache[mailaddr]["body"],
+            "code": result["code"],
+            "body": result["body"],
             "cached": True
         })
 
-    # 强制刷新或没缓存 → 请求 Kukulu
     token = manager.get_token()
     k = Kukulu(token['csrf_token'], token['sessionhash'], mailaddr)
     result = k.check_top_mail(mailaddr)
@@ -84,6 +85,23 @@ def api_check_captcha(mailaddr):
         "body": result.get("body"),
         "cached": False
     })
+
+@app.route("/api/domains", methods=["GET", "POST"])
+def api_domains():
+    if request.method == "GET":
+        if not os.path.exists(CUSTOM_DOMAINS_FILE):
+            return jsonify({"domains": []})
+        with open(CUSTOM_DOMAINS_FILE, "r", encoding="utf-8") as f:
+            domains = [line.strip() for line in f if line.strip()]
+        return jsonify({"domains": domains})
+
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True)
+        if not isinstance(data, list):
+            return jsonify({"error": "必须是字符串数组"}), 400
+        with open(CUSTOM_DOMAINS_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(data) + "\n")
+        return jsonify({"ok": True, "domains": data})
 
 @app.route("/ui")
 def ui_page():
