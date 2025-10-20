@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request, render_template
 from kukulu import Kukulu
 from token_manager import TokenManager
-import logging, os, json, random, time
+import logging, os, json, time, random
 from urllib.parse import unquote
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +41,6 @@ def load_map():
 def save_map(m):
     tmp = TOKENS_DB + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        # 👇 确保保存为明文 JSON
         json.dump(m, f, ensure_ascii=False, indent=2)
     os.replace(tmp, TOKENS_DB)
 
@@ -54,58 +53,74 @@ def get_mapping(email):
     return load_map().get(email.lower())
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-# 👇 关键配置：让 jsonify 返回明文 UTF-8，而不是 \uXXXX
-app.config['JSON_AS_ASCII'] = False
+app.config["JSON_AS_ASCII"] = False
 manager = TokenManager()
 
-# --- 创建邮箱（随机后缀）
+# --- 创建随机邮箱（自动轮换 token）
 @app.route("/api/create_random", methods=["GET"])
-@app.route("/api/create_随机后缀", methods=["GET"])
 def api_create_random():
-    token = manager.get_token()
-    k = Kukulu(token['csrf_token'], token['sessionhash'])
-    mail = k.create_mailaddress()
-    set_mapping(mail, token['csrf_token'], token['sessionhash'])
-    logging.info(f"[CREATE_AUTO] mail={mail} token={json.dumps(token, ensure_ascii=False)}")
-    return jsonify({"mailaddress": mail, **token})
+    for _ in range(5):
+        token = manager.get_token()
+        k = Kukulu(token["csrf_token"], token["sessionhash"])
+        try:
+            mail = k.create_mailaddress()
+            set_mapping(mail, token["csrf_token"], token["sessionhash"])
+            logging.info(f"[CREATE_AUTO] mail={mail} token={token}")
+            return jsonify({"mailaddress": mail, **token})
+        except RuntimeError as e:
+            if "MAX_ADDRESS_REACHED" in str(e):
+                logging.warning(f"[TOKEN_FULL] {token} exceeded limit, rotating...")
+                manager.mark_bad(token)
+                continue
+        except Exception as e:
+            logging.error(f"[CREATE_FAIL] {e}")
+            manager.mark_bad(token)
+            continue
+    return jsonify({"error": "no valid token left"}), 500
 
-# --- 创建邮箱（指定后缀池随机挑一个）
+# --- 指定后缀邮箱
 @app.route("/api/create_custom", methods=["GET"])
-@app.route("/api/create_指定后缀", methods=["GET"])
 def api_create_custom():
     domains = load_domains()
     if not domains:
         return jsonify({"error": "no custom domains"}), 400
-    domain = random.choice(domains)
-    token = manager.get_token()
-    k = Kukulu(token['csrf_token'], token['sessionhash'])
-    mail = k.specify_address(domain)
-    set_mapping(mail, token['csrf_token'], token['sessionhash'])
-    logging.info(f"[CREATE_CUSTOM] mail={mail} domain={domain} token={json.dumps(token, ensure_ascii=False)}")
-    return jsonify({"mailaddress": mail, **token})
+    for _ in range(5):
+        token = manager.get_token()
+        k = Kukulu(token["csrf_token"], token["sessionhash"])
+        domain = random.choice(domains)
+        try:
+            mail = k.specify_address(domain)
+            set_mapping(mail, token["csrf_token"], token["sessionhash"])
+            logging.info(f"[CREATE_CUSTOM] mail={mail} domain={domain} token={token}")
+            return jsonify({"mailaddress": mail, **token})
+        except RuntimeError as e:
+            if "MAX_ADDRESS_REACHED" in str(e):
+                logging.warning(f"[TOKEN_FULL] {token} exceeded limit, rotating...")
+                manager.mark_bad(token)
+                continue
+        except Exception as e:
+            logging.error(f"[CREATE_FAIL] {e}")
+            manager.mark_bad(token)
+            continue
+    return jsonify({"error": "no valid token left"}), 500
 
-# --- 仅传邮箱获取验证码
+# --- 获取验证码
 @app.route("/api/check_captcha/<path:mailaddr>", methods=["GET"])
 def api_check_captcha(mailaddr):
     email = unquote(mailaddr)
     rec = get_mapping(email)
     if not rec:
         return jsonify({"error": "no token cached"}), 404
-    k = Kukulu(rec["csrf_token"], rec["sessionhash"])
-    code = k.check_top_mail(email)
-    if code:
-        return jsonify({"mailaddress": email, "code": code})
-    token = rec
-    for _ in range(4):
-        token = manager.rotate_token()
+    for _ in range(5):
+        token = manager.get_token()
         k = Kukulu(token["csrf_token"], token["sessionhash"])
         code = k.check_top_mail(email)
         if code:
             set_mapping(email, token["csrf_token"], token["sessionhash"])
             return jsonify({"mailaddress": email, "code": code})
+        manager.rotate_token()
     return jsonify({"mailaddress": email, "code": None}), 404
 
-# --- 无密钥的后缀池管理
 @app.route("/api/domains", methods=["GET", "POST"])
 def api_domains():
     if request.method == "GET":
@@ -117,7 +132,6 @@ def api_domains():
     save_domains(domains_clean)
     return jsonify({"ok": True, "domains": domains_clean})
 
-# --- 历史记录
 @app.route("/api/history", methods=["GET"])
 def api_history():
     m = load_map()
